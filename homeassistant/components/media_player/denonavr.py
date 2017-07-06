@@ -23,7 +23,9 @@ from homeassistant.const import (
     STATE_PAUSED, STATE_PLAYING)
 import homeassistant.helpers.config_validation as cv
 
-REQUIREMENTS = ['denonavr==0.7.8']
+REQUIREMENTS = [
+    'http://github.com/jgrieger1/denonavr/archive/AVR4310.zip'
+    '#denonavr==0.5.5']
 
 _LOGGER = logging.getLogger(__name__)
 
