@@ -30,6 +30,7 @@ REQUIREMENTS = [
 _LOGGER = logging.getLogger(__name__)
 
 ATTR_SOUND_MODE_RAW = 'sound_mode_raw'
+ATTR_MASTER_POWER = 'master_power'
 
 CONF_INVALID_ZONES_ERR = 'Invalid Zone (expected Zone2 or Zone3)'
 CONF_SHOW_ALL_SOURCES = 'show_all_sources'
@@ -146,6 +147,7 @@ class DenonDevice(MediaPlayerDevice):
         self._source_list = self._receiver.input_func_list
         self._state = self._receiver.state
         self._power = self._receiver.power
+        self._master_power = self._receiver.master_power
         self._media_image_url = self._receiver.image_url
         self._title = self._receiver.title
         self._artist = self._receiver.artist
@@ -178,6 +180,7 @@ class DenonDevice(MediaPlayerDevice):
         self._source_list = self._receiver.input_func_list
         self._state = self._receiver.state
         self._power = self._receiver.power
+        self._master_power = self._receiver.master_power
         self._media_image_url = self._receiver.image_url
         self._title = self._receiver.title
         self._artist = self._receiver.artist
@@ -198,7 +201,7 @@ class DenonDevice(MediaPlayerDevice):
     def state(self):
         """Return the state of the device."""
         return self._state
-
+        
     @property
     def is_volume_muted(self):
         """Return boolean if volume is currently muted."""
@@ -317,6 +320,7 @@ class DenonDevice(MediaPlayerDevice):
         if (self._sound_mode_raw is not None and self._sound_mode_support and
                 self._power == 'ON'):
             attributes[ATTR_SOUND_MODE_RAW] = self._sound_mode_raw
+        attributes[ATTR_MASTER_POWER] = self._master_power
         return attributes
 
     def media_play_pause(self):
