@@ -20,7 +20,7 @@ from homeassistant.const import (
 import homeassistant.helpers.config_validation as cv
 import homeassistant.util.dt as dt_util
 
-REQUIREMENTS = ['directpy==0.5']
+REQUIREMENTS = ['https://github.com/jgrieger1/DirectPy/archive/master.zip#DirectPy']
 
 _LOGGER = logging.getLogger(__name__)
 
