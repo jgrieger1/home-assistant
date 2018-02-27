@@ -70,6 +70,7 @@ alarmdecoder_alarm_toggle_chime:
       description: A required code to toggle the alarm control panel chime with.
       example: 1234
 
+
 ifttt_push_alarm_state:
   description: Update the alarm state to the specified value.
   fields:
@@ -131,3 +132,13 @@ elkm1_alarm_display_message:
     line2:
       description: Up to 16 characters of text (truncated if too long). Default blank.
       example: the universe, and everything.
+
+alarm_toggle_chime:
+  description: Send the alarm the toggle chime command.
+  fields:
+    entity_id:
+      description: Name of the alarm control panel to trigger.
+      example: 'alarm_control_panel.downstairs'
+    code:
+      description: An optional code to toggle the alarm control panel chime with.
+      example: 1234
