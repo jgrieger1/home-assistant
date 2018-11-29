@@ -19,6 +19,8 @@ import homeassistant.helpers.config_validation as cv
 _CONFIGURING = {}
 _LOGGER = logging.getLogger(__name__)
 
+STATE_AUX_HEAT_ONLY = 'auxHeatOnly'
+
 ATTR_FAN_MIN_ON_TIME = 'fan_min_on_time'
 ATTR_RESUME_ALL = 'resume_all'
 
@@ -120,6 +122,7 @@ class Thermostat(ClimateDevice):
                                 'heat', 'off']
         self._fan_list = ['auto', 'on']
         self.update_without_throttle = False
+        self.desired_fan_min_on_time = '0'
 
     def update(self):
         """Get the latest state from the thermostat."""
@@ -131,6 +134,9 @@ class Thermostat(ClimateDevice):
 
         self.thermostat = self.data.ecobee.get_thermostat(
             self.thermostat_index)
+
+        if self.thermostat['settings']['fanMinOnTime'] < 60:
+            self.desired_fan_min_on_time = self.thermostat['settings']['fanMinOnTime']
 
     @property
     def supported_features(self):
@@ -171,8 +177,9 @@ class Thermostat(ClimateDevice):
         """Return the temperature we try to reach."""
         if self.current_operation == STATE_AUTO:
             return None
-        if self.current_operation == STATE_HEAT:
-            return self.thermostat['runtime']['desiredHeat'] / 10.0
+        if self.current_operation == STATE_HEAT or \
+            self.current_operation == STATE_AUX_HEAT_ONLY:
+                return self.thermostat['runtime']['desiredHeat'] / 10.0
         if self.current_operation == STATE_COOL:
             return self.thermostat['runtime']['desiredCool'] / 10.0
         return None
@@ -228,11 +235,8 @@ class Thermostat(ClimateDevice):
 
     @property
     def current_operation(self):
-        """Return current operation."""
-        if self.operation_mode == 'auxHeatOnly' or \
-                self.operation_mode == 'heatPump':
-            return STATE_HEAT
-        return self.operation_mode
+        """Return current mode of thermostat (auto, auxHeatOnly, cool, heat, off)"""
+        return self.thermostat['settings']['hvacMode']
 
     @property
     def operation_list(self):
@@ -240,9 +244,18 @@ class Thermostat(ClimateDevice):
         return self._operation_list
 
     @property
-    def operation_mode(self):
-        """Return current operation ie. heat, cool, idle."""
-        return self.thermostat['settings']['hvacMode']
+    def equipment_status(self):
+        """Return current operation status of equipment"""
+        status = self.thermostat['equipmentStatus']
+        if status == '':
+            status = 'Idle'
+        elif 'Cool' in status:
+            status = 'Cool'
+        elif 'auxHeat' in status:
+            status = 'AuxHeat'
+        elif 'heatPump' in status:
+            status = 'HeatPump'
+        return status
 
     @property
     def mode(self):
@@ -250,6 +263,14 @@ class Thermostat(ClimateDevice):
         cur = self.thermostat['program']['currentClimateRef']
         climates = self.thermostat['program']['climates']
         current = list(filter(lambda x: x['climateRef'] == cur, climates))
+        if self.is_away_mode_on:
+          return 'away hold'
+        if self.current_hold_mode == TEMPERATURE_HOLD:
+          return 'temp hold'
+        if self.current_hold_mode == 'away':
+          return 'smart away'
+        if self.current_hold_mode == 'home':
+          return 'smart home'
         return current[0]['name']
 
     @property
@@ -261,26 +282,17 @@ class Thermostat(ClimateDevice):
     def device_state_attributes(self):
         """Return device specific state attributes."""
         # Move these to Thermostat Device and make them global
-        status = self.thermostat['equipmentStatus']
-        operation = None
-        if status == '':
-            operation = STATE_IDLE
-        elif 'Cool' in status:
-            operation = STATE_COOL
-        elif 'auxHeat' in status:
-            operation = STATE_HEAT
-        elif 'heatPump' in status:
-            operation = STATE_HEAT
-        else:
-            operation = status
 
         return {
             "actual_humidity": self.thermostat['runtime']['actualHumidity'],
             "fan": self.fan,
-            "climate_mode": self.mode,
-            "operation": operation,
-            "climate_list": self.climate_list,
-            "fan_min_on_time": self.fan_min_on_time
+            "equipment_status": self.equipment_status,
+            "comfort_mode": self.mode,
+            "comfort_list": self.climate_list,
+            "fan_min_on_time": self.fan_min_on_time,
+            "external_temperature": self.external_temperature,
+            "target_temp_low_setting": self.target_temp_low_setting,
+            "target_temp_high_setting": self.target_temp_high_setting
         }
 
     @property
@@ -357,12 +369,10 @@ class Thermostat(ClimateDevice):
             error = "Invalid fan_mode value:  Valid values are 'on' or 'auto'"
             _LOGGER.error(error)
             return
-
-        cool_temp = self.thermostat['runtime']['desiredCool'] / 10.0
-        heat_temp = self.thermostat['runtime']['desiredHeat'] / 10.0
-        self.data.ecobee.set_fan_mode(self.thermostat_index, fan_mode,
-                                      cool_temp, heat_temp,
-                                      self.hold_preference())
+        if fan_mode.lower() == STATE_ON:
+            self.set_fan_min_on_time('60')
+        else:
+            self.set_fan_min_on_time(self.desired_fan_min_on_time)
 
         _LOGGER.info("Setting fan mode to: %s", fan_mode)
 
@@ -377,10 +387,12 @@ class Thermostat(ClimateDevice):
         heatCoolMinDelta property.
         https://www.ecobee.com/home/developer/api/examples/ex5.shtml
         """
-        if self.current_operation == STATE_HEAT or self.current_operation == \
-                STATE_COOL:
-            heat_temp = temp
-            cool_temp = temp
+        # Set arbitrary range when not in auto mode
+        if self.current_operation == STATE_HEAT or \
+            self.current_operation == STATE_AUX_HEAT_ONLY or \
+            self.current_operation == STATE_COOL:
+                heat_temp = temp
+                cool_temp = temp
         else:
             delta = self.thermostat['settings']['heatCoolMinDelta'] / 10
             heat_temp = temp - delta
@@ -426,9 +438,13 @@ class Thermostat(ClimateDevice):
     def hold_preference(self):
         """Return user preference setting for hold time."""
         # Values returned from thermostat are 'useEndTime4hour',
-        # 'useEndTime2hour', 'nextTransition', 'indefinite', 'askMe'
+        # 'useEndTime2hour', 'nextPeriod', 'indefinite', 'askMe'
         default = self.thermostat['settings']['holdAction']
-        if default == 'nextTransition':
+        if default == 'nextPeriod':
+            return 'nextTransition'
+        if default == 'useEndTime4hour':
+            return 'holdHours","holdHours":"4'
+        if default == 'indefinite':
             return default
         # add further conditions if other hold durations should be
         # supported; note that this should not include 'indefinite'
@@ -440,3 +456,18 @@ class Thermostat(ClimateDevice):
         """Return the list of climates currently available."""
         climates = self.thermostat['program']['climates']
         return list(map((lambda x: x['name']), climates))
+
+    @property
+    def external_temperature(self):
+        """Return the current external temperature."""
+        return self.thermostat['weather']['forecasts'][0]['temperature'] / 10
+
+    @property
+    def target_temp_low_setting(self):
+        """Return the lower bound temperature setting."""
+        return self.thermostat['runtime']['desiredHeat'] / 10.0
+
+    @property
+    def target_temp_high_setting(self):
+        """Return the upper bound temperature setting."""
+        return self.thermostat['runtime']['desiredCool'] / 10.0
