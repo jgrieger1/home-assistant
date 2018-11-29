@@ -8,6 +8,7 @@ import asyncio
 from datetime import timedelta
 import logging
 import socket
+import requests
 
 import voluptuous as vol
 
@@ -23,7 +24,7 @@ from homeassistant.const import (
 import homeassistant.helpers.config_validation as cv
 from homeassistant.util import dt as dt_util
 
-REQUIREMENTS = ['samsungctl[websocket]==0.7.1', 'wakeonlan==1.1.6']
+REQUIREMENTS = ['https://github.com/jgrieger1/samsungctl/archive/master.zip#samsungctl[websocket]==0.7.1', 'wakeonlan==1.1.6']
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -122,14 +123,28 @@ class SamsungTVDevice(MediaPlayerDevice):
             'timeout': timeout,
         }
 
-        if self._config['port'] == 8001:
+        if self._config['port'] == 8001 or self._config['port'] == 8002:
             self._config['method'] = 'websocket'
         else:
             self._config['method'] = 'legacy'
 
     def update(self):
         """Update state of device."""
-        self.send_key("KEY")
+        if self._config['method'] == 'websocket':
+            if self._power_off_in_progress():
+                self._state = STATE_OFF
+            else:
+                try:
+                    if self.is_tv_on():
+                        self._state = STATE_ON
+                    else:
+                        self._state = STATE_OFF
+                        self._remote = None
+                except OSError:
+                    self._state = STATE_OFF
+                    self._remote = None
+        else:
+            self.send_key("KEY")
 
     def get_remote(self):
         """Create or return a remote control instance."""
@@ -141,34 +156,35 @@ class SamsungTVDevice(MediaPlayerDevice):
 
     def send_key(self, key):
         """Send a key to the tv and handles exceptions."""
-        if self._power_off_in_progress() \
-                and key not in ('KEY_POWER', 'KEY_POWEROFF'):
-            _LOGGER.info("TV is powering off, not sending command: %s", key)
-            return
-        try:
-            # recreate connection if connection was dead
-            retry_count = 1
-            for _ in range(retry_count + 1):
-                try:
-                    self.get_remote().control(key)
-                    break
-                except (self._exceptions_class.ConnectionClosed,
-                        BrokenPipeError):
-                    # BrokenPipe can occur when the commands is sent to fast
-                    self._remote = None
-            self._state = STATE_ON
-        except (self._exceptions_class.UnhandledResponse,
-                self._exceptions_class.AccessDenied):
-            # We got a response so it's on.
-            self._state = STATE_ON
-            self._remote = None
-            _LOGGER.debug("Failed sending command %s", key, exc_info=True)
-            return
-        except OSError:
-            self._state = STATE_OFF
-            self._remote = None
-        if self._power_off_in_progress():
-            self._state = STATE_OFF
+        if (self._mac and self._state == STATE_ON) or not self._mac:
+            if self._power_off_in_progress() \
+                    and key not in ('KEY_POWER', 'KEY_POWEROFF'):
+                _LOGGER.info("TV is powering off, not sending command: %s", key)
+                return
+            try:
+                # recreate connection if connection was dead
+                retry_count = 1
+                for _ in range(retry_count + 1):
+                    try:
+                        self.get_remote().control(key)
+                        break
+                    except (self._exceptions_class.ConnectionClosed,
+                            BrokenPipeError):
+                        # BrokenPipe can occur when the commands is sent to fast
+                        self._remote = None
+                self._state = STATE_ON
+            except (self._exceptions_class.UnhandledResponse,
+                    self._exceptions_class.AccessDenied):
+                # We got a response so it's on.
+                self._state = STATE_ON
+                self._remote = None
+                _LOGGER.debug("Failed sending command %s", key, exc_info=True)
+                return
+            except OSError:
+                self._state = STATE_OFF
+                self._remote = None
+            if self._power_off_in_progress():
+                self._state = STATE_OFF
 
     def _power_off_in_progress(self):
         return self._end_of_power_off is not None and \
@@ -276,3 +292,21 @@ class SamsungTVDevice(MediaPlayerDevice):
             self._wol.send_magic_packet(self._mac)
         else:
             self.send_key('KEY_POWERON')
+
+    def is_tv_on(self):
+        if self._config["port"] == 8002:
+            base_url = "https://{}:{}/api/v2/"
+        else:
+            base_url = "http://{}:{}/api/v2/"
+        url = base_url.format(self._config['host'], self._config['port'])
+        try:
+            res = requests.get(url, timeout=1, verify=False)
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.HTTPError,
+                requests.exceptions.ReadTimeout):
+            return False
+        if res is not None and res.status_code == 200:
+            return True
+        else:
+            return False
