@@ -156,7 +156,7 @@ class DenonDevice(MediaPlayerDevice):
         self._frequency = self._receiver.frequency
         self._station = self._receiver.station
 
-        self._sound_mode_support = self._receiver.support_sound_mode
+        self._sound_mode_support = False
         if self._sound_mode_support:
             self._sound_mode = self._receiver.sound_mode
             self._sound_mode_raw = self._receiver.sound_mode_raw
