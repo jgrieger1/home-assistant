@@ -603,11 +603,15 @@ class KodiDevice(MediaPlayerDevice):
     @property
     def media_season(self):
         """Season of current playing media, TV show only."""
+        if not self._item.get('showtitle'):
+          return ""
         return self._item.get('season')
 
     @property
     def media_episode(self):
         """Episode of current playing media, TV show only."""
+        if not self._item.get('showtitle'):
+          return ""
         return self._item.get('episode')
 
     @property
