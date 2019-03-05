@@ -17,14 +17,15 @@ from homeassistant.components.media_player import (
 from homeassistant.components.media_player.const import (
     MEDIA_TYPE_CHANNEL, SUPPORT_NEXT_TRACK, SUPPORT_PAUSE,
     SUPPORT_PLAY, SUPPORT_PLAY_MEDIA, SUPPORT_PREVIOUS_TRACK, SUPPORT_TURN_OFF,
-    SUPPORT_TURN_ON, SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_STEP)
+    SUPPORT_TURN_ON, SUPPORT_VOLUME_MUTE, SUPPORT_VOLUME_STEP,
+    SUPPORT_VOLUME_SET,SUPPORT_SELECT_SOURCE)
 from homeassistant.const import (
     CONF_HOST, CONF_MAC, CONF_NAME, CONF_PORT, CONF_TIMEOUT, STATE_OFF,
     STATE_ON)
 import homeassistant.helpers.config_validation as cv
 from homeassistant.util import dt as dt_util
 
-REQUIREMENTS = ['https://github.com/jgrieger1/samsungctl/archive/master.zip#samsungctl[websocket]==0.7.1', 'wakeonlan==1.1.6']
+REQUIREMENTS = ['https://github.com/jgrieger1/samsungctl/archive/myBranch.zip#samsungctl[websocket]==0.8.0b', 'wakeonlan==1.1.6']
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,19 +33,28 @@ DEFAULT_NAME = 'Samsung TV Remote'
 DEFAULT_PORT = 55000
 DEFAULT_TIMEOUT = 1
 
+CONF_SOURCES = 'sources'
+CONF_RIGHT_CLICKS = 'right_clicks'
+
 KEY_PRESS_TIMEOUT = 1.2
 KNOWN_DEVICES_KEY = 'samsungtv_known_devices'
 
 SUPPORT_SAMSUNGTV = SUPPORT_PAUSE | SUPPORT_VOLUME_STEP | \
     SUPPORT_VOLUME_MUTE | SUPPORT_PREVIOUS_TRACK | \
-    SUPPORT_NEXT_TRACK | SUPPORT_TURN_OFF | SUPPORT_PLAY | SUPPORT_PLAY_MEDIA
+    SUPPORT_NEXT_TRACK | SUPPORT_TURN_OFF | SUPPORT_PLAY | SUPPORT_PLAY_MEDIA | \
+    SUPPORT_VOLUME_SET | SUPPORT_SELECT_SOURCE
+
+VIDEO_SOURCES_SCHEMA = vol.Schema({
+    vol.Required(CONF_NAME): cv.string,
+    vol.Required(CONF_RIGHT_CLICKS): cv.positive_int,
+})
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_HOST): cv.string,
     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
     vol.Optional(CONF_PORT, default=DEFAULT_PORT): cv.port,
-    vol.Optional(CONF_MAC): cv.string,
     vol.Optional(CONF_TIMEOUT, default=DEFAULT_TIMEOUT): cv.positive_int,
+    vol.Optional(CONF_SOURCES): vol.All(cv.ensure_list, [VIDEO_SOURCES_SCHEMA]),
 })
 
 
@@ -56,6 +66,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         hass.data[KNOWN_DEVICES_KEY] = known_devices
 
     uuid = None
+    sources = None
     # Is this a manual configuration?
     if config.get(CONF_HOST) is not None:
         host = config.get(CONF_HOST)
@@ -63,6 +74,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         name = config.get(CONF_NAME)
         mac = config.get(CONF_MAC)
         timeout = config.get(CONF_TIMEOUT)
+        sources = config.get(CONF_SOURCES)
     elif discovery_info is not None:
         tv_name = discovery_info.get('name')
         model = discovery_info.get('model_name')
@@ -83,7 +95,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     ip_addr = socket.gethostbyname(host)
     if ip_addr not in known_devices:
         known_devices.add(ip_addr)
-        add_entities([SamsungTVDevice(host, port, name, timeout, mac, uuid)])
+        add_entities([SamsungTVDevice(host, port, name, timeout, mac, uuid, sources)])
         _LOGGER.info("Samsung TV %s:%d added as '%s'", host, port, name)
     else:
         _LOGGER.info("Ignoring duplicate Samsung TV %s:%d", host, port)
@@ -92,10 +104,11 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
 class SamsungTVDevice(MediaPlayerDevice):
     """Representation of a Samsung TV."""
 
-    def __init__(self, host, port, name, timeout, mac, uuid):
+    def __init__(self, host, port, name, timeout, mac, uuid, sources):
         """Initialize the Samsung device."""
         from samsungctl import exceptions
         from samsungctl import Remote
+        from samsungctl import Config as samsungctl_config
         import wakeonlan
         # Save a reference to the imported classes
         self._exceptions_class = exceptions
@@ -113,7 +126,14 @@ class SamsungTVDevice(MediaPlayerDevice):
         # Mark the end of a shutdown command (need to wait 15 seconds before
         # sending the next command to avoid turning the TV back ON).
         self._end_of_power_off = None
+        self._volume = 0
+        # Setup the source list
+        self._source_list = {}
+        if sources is not None:
+            for entry in sources:
+                self._source_list[entry[CONF_NAME]] = entry.get(CONF_RIGHT_CLICKS)
         # Generate a configuration for the Samsung library
+        self._samsungctl_config = samsungctl_config.load('/home/homeassistant/.homeassistant/samsungctl.conf')
         self._config = {
             'name': 'HomeAssistant',
             'description': name,
@@ -136,10 +156,16 @@ class SamsungTVDevice(MediaPlayerDevice):
             else:
                 try:
                     if self.is_tv_on():
-                        self._state = STATE_ON
-                    else:
-                        self._state = STATE_OFF
-                        self._remote = None
+                        remote = self.get_remote()
+                        if remote is not None:
+                            try:
+                                self._volume = remote.volume
+                            except Exception:
+                                _LOGGER.debug("Failed to get volume property from TV.  Is TV turning off?")
+                            try:
+                                self._muted = remote.mute
+                            except Exception:
+                                _LOGGER.debug("Failed to get mute property from TV.  Is TV turning off?")
                 except OSError:
                     self._state = STATE_OFF
                     self._remote = None
@@ -150,7 +176,7 @@ class SamsungTVDevice(MediaPlayerDevice):
         """Create or return a remote control instance."""
         if self._remote is None:
             # We need to create a new instance to reconnect.
-            self._remote = self._remote_class(self._config)
+            self._remote = self._remote_class(self._samsungctl_config)
 
         return self._remote
 
@@ -178,13 +204,31 @@ class SamsungTVDevice(MediaPlayerDevice):
                 # We got a response so it's on.
                 self._state = STATE_ON
                 self._remote = None
-                _LOGGER.debug("Failed sending command %s", key, exc_info=True)
+                _LOGGER.warning("Failed sending command %s", key, exc_info=True)
                 return
             except OSError:
                 self._state = STATE_OFF
                 self._remote = None
             if self._power_off_in_progress():
                 self._state = STATE_OFF
+
+    def set_property(self, prop, value):
+        if self._power_off_in_progress():
+            _LOGGER.info("TV is powering off, not setting property: %s", prop)
+            return
+        try:
+            if self.is_tv_on():
+                if prop == 'volume':
+                    self.get_remote().volume = value
+                if prop == 'source':
+                    self.get_remote().source = value
+                self.update()
+        except OSError:
+            self._state = STATE_OFF
+            self._remote = None
+        except ValueError:
+            _LOGGER.error("ValueError trying to set property: %s with value of: %s", prop, value)
+            pass
 
     def _power_off_in_progress(self):
         return self._end_of_power_off is not None and \
@@ -209,6 +253,19 @@ class SamsungTVDevice(MediaPlayerDevice):
     def is_volume_muted(self):
         """Boolean if volume is currently muted."""
         return self._muted
+
+    @property
+    def volume_level(self):
+        return float(self._volume) / 100
+
+    @property
+    def source_list(self):
+        """Return a list of available input sources."""
+        sources = []
+        for key in self._source_list:
+            sources.append(key)
+        return sources
+
 
     @property
     def supported_features(self):
@@ -305,8 +362,42 @@ class SamsungTVDevice(MediaPlayerDevice):
                 requests.exceptions.ConnectionError,
                 requests.exceptions.HTTPError,
                 requests.exceptions.ReadTimeout):
+            self._state = STATE_OFF
+            self._remote = None
             return False
         if res is not None and res.status_code == 200:
+            self._state = STATE_ON
             return True
         else:
+            _LOGGER.info("Error status returned when checking if TV is on: %s", res.status_code)
+            self._state = STATE_OFF
+            self._remote = None
             return False
+
+    def select_source(self, source):
+        """Set source of TV using remote keys"""
+        max_right_clicks = 1
+        for key in self._source_list:
+            if self._source_list[key] > max_right_clicks:
+                max_right_clicks = self._source_list[key]
+
+        right_clicks = self._source_list[source]
+        if self._state == STATE_ON:
+            self.send_key('KEY_EXIT')
+        if self._state == STATE_ON:
+            self.send_key('KEY_EXIT')
+            self.send_key('KEY_SOURCE')
+            for x in range(max_right_clicks + 3):
+                self.send_key('KEY_LEFT')
+            for x in range(right_clicks):
+                self.send_key('KEY_RIGHT')
+            self.send_key('KEY_ENTER')
+        else:
+            _LOGGER.info("TV is powered off, not selecting source: %s", source)
+
+
+    def set_volume_level(self, volume):
+        """Set source of TV"""
+        volume_level = round(float(volume) * 100)
+        self.set_property('volume', volume_level)
+
